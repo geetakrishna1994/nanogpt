@@ -6,7 +6,7 @@ import time
 with open("input.txt", "r") as f:
     text = f.read()
 
-charset = set(text)    
+charset = list(sorted(list(set(text))))    
 vocab_size = len(charset)
 stoi = {c:i for i, c in enumerate(charset)}
 itos = {i:c for i, c in enumerate(charset)}
@@ -25,6 +25,7 @@ n_embd = 384
 dropout = 0.2
 n_heads = 6
 n_layers = 6
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #--------------
 
 data = torch.tensor(encode(text), dtype = torch.long)
@@ -63,7 +64,7 @@ def generate_random_sample(split):
     rand_idx = torch.randint(len(data) - block_size, size=(batch_size,))
     x = torch.stack([data[idx: idx + block_size] for idx in rand_idx], dim=0)
     y = torch.stack([data[idx + 1: idx + block_size + 1] for idx in rand_idx], dim=0)
-    return x, y
+    return x.to(device), y.to(device)
     
 
 class BigramAverageLanguageModel(nn.Module):
@@ -106,13 +107,13 @@ class Head(nn.Module):
         super().__init__()
         self.head_size = head_size
         self.qkv = nn.Linear(n_embd, 3*head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size, device=device)))
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
         T = x.shape[1]
         q,k,v = self.qkv(x).split(self.head_size, dim=-1)
-        wei = q @ k.transpose(1,2) / torch.sqrt(torch.tensor(k.shape[-1]))
+        wei = q @ k.transpose(1,2) / torch.sqrt(torch.tensor(k.shape[-1], device=device))
         mask = self.tril[:T, :T] == 0
         wei = torch.softmax(wei.masked_fill(mask, -torch.inf), dim=-1)
         out = wei @ v
@@ -168,7 +169,7 @@ class GPTModel(nn.Module):
     def forward(self, idx, targets=None):
         _,T = idx.shape
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.pos_embedding_table(torch.arange(T))
+        pos_emb = self.pos_embedding_table(torch.arange(T, device=device))
         emb = tok_emb + pos_emb
         x = self.blocks(emb)
         x = self.ln_f(x)
@@ -179,13 +180,15 @@ class GPTModel(nn.Module):
             loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
         return logits, loss
     
+    @torch.no_grad()
     def generate(self, idx, max_gen_len):
+        self.eval()
         for _ in range(max_gen_len):
             logits, _ = self(idx[:, -block_size:])
             probs = torch.softmax(logits[:, -1, :], dim=-1)
             next_idx = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, next_idx), dim=-1)
-        return decode(idx.tolist()[0])
+        return decode(idx.detach().cpu().tolist()[0])
         
 
 class LLM(nn.Module):
@@ -228,7 +231,7 @@ def train_model(model_type):
         model = LLM()
         model_path = 'llm_head_best_model.pt'
     elif model_type == 'gpt':
-        model = GPTModel()
+        model = GPTModel().to(device)
         model_path = 'gpt_head_best_model.pt'
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -246,16 +249,17 @@ def train_model(model_type):
         _, val_loss = model(x_val, y_val)
         if (i+1) % print_interval == 0:
             print(f"iteraction: {i+1}, train_loss: {loss}, val_loss: {val_loss}")
-        if best_loss is None or loss.item() < best_loss:
-            torch.save(model.state_dict(), model_path)
-            best_loss = loss.item()
+        # if best_loss is None or loss.item() < best_loss:
+        #     torch.save(model.state_dict(), model_path)
+        #     best_loss = loss.item()
 
-    model.load_state_dict(torch.load(model_path))
-    print(model.generate(torch.zeros((1,1), dtype=torch.long),100))
+    # model.load_state_dict(torch.load(model_path))
+    torch.save(model.state_dict(), model_path)
+    print(model.generate(torch.zeros((1,1), dtype=torch.long, device=device),1000))
 
 
 if __name__ == "__main__":
-    # x, y = generate_random_sample("train")
+    x, y = generate_random_sample("train")
     # model = GPTModel()
     # logits, loss = model(x, y)
     # print(logits.shape)
@@ -264,9 +268,7 @@ if __name__ == "__main__":
     # print(x.shape)
     # print(y.shape)
     # model = BigramAverageLanguageModel()
-    model = GPTModel()
-    model.load_state_dict(torch.load("gpt_head_best_model.pt"))
-    print(model.generate(torch.zeros((1,1), dtype=torch.long), 100))
+    
     # logits, loss = model(x, y)
     # print(logits.shape)
     # print(loss)
@@ -276,3 +278,12 @@ if __name__ == "__main__":
     # et = time.time()
     # print(et - st)    
     
+    # model = GPTModel().to(device)
+    # model.load_state_dict(torch.load("gpt_head_best_model.pt", map_location=device))
+    # model.eval()
+    # # model.eval()
+    # logits, loss = model(x, y)
+    # # print(logits.shape)
+    # # print(loss.shape)
+    # print(loss)
+    # print(model.generate(torch.zeros((1,1), dtype=torch.long, device=device), 1000))
